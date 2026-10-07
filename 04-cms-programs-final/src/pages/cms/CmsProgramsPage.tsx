@@ -1,0 +1,108 @@
+import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { SiteHeader } from '../../components/SiteHeader';
+import { CmsSidebar } from '../../components/CmsSidebar';
+import { supabase } from '../../lib/supabase';
+
+const tabs = [
+  ['club', 'CEO Club'],
+  ['membership', 'Membership'],
+  ['council', 'Leadership Council'],
+  ['events', 'Events'],
+  ['inbox', 'Applications & registrations'],
+] as const;
+
+const labels: Record<string, string> = {
+  club: 'CEO Club settings',
+  membership: 'Membership categories',
+  council: 'Global Leadership Council',
+  events: 'Events',
+  inbox: 'Applications & registrations',
+};
+
+const getTab = () => new URLSearchParams(window.location.search).get('tab') || 'club';
+
+export default function CmsProgramsPage() {
+  const [tab, setTab] = useState(getTab);
+  const [rows, setRows] = useState<any[]>([]);
+  const [message, setMessage] = useState('');
+  const [form, setForm] = useState<Record<string, string | boolean>>({ status: 'draft', active: true, registration_open: true, visibility: 'public', display_order: '1' });
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const table = tab === 'club' ? 'aiif_ceo_club_settings' : tab === 'membership' ? 'membership_categories' : tab === 'council' ? 'council_members' : tab === 'events' ? 'aiif_events' : 'membership_applications';
+  const fields = useMemo(() => tab === 'club'
+    ? [['name_en', 'Name — English'], ['name_ar', 'Name — Arabic'], ['intro_en', 'Introduction — English'], ['intro_ar', 'Introduction — Arabic']]
+    : tab === 'membership'
+      ? [['name_en', 'Name — English'], ['name_ar', 'Name — Arabic'], ['description_en', 'Description — English'], ['description_ar', 'Description — Arabic'], ['fee_label_en', 'Fee label — English'], ['fee_label_ar', 'Fee label — Arabic']]
+      : tab === 'council'
+        ? [['full_name_en', 'Name — English'], ['full_name_ar', 'Name — Arabic'], ['title_en', 'Title — English'], ['title_ar', 'Title — Arabic'], ['organization_en', 'Organization — English'], ['organization_ar', 'Organization — Arabic'], ['bio_en', 'Bio — English'], ['bio_ar', 'Bio — Arabic']]
+        : tab === 'events'
+          ? [['slug', 'Slug'], ['title_en', 'Title — English'], ['title_ar', 'Title — Arabic'], ['summary_en', 'Summary — English'], ['summary_ar', 'Summary — Arabic'], ['start_at', 'Start date/time'], ['location_en', 'Location — English'], ['location_ar', 'Location — Arabic']]
+          : [], [tab]);
+
+  useEffect(() => {
+    const onLocationChange = () => {
+      const next = getTab();
+      setTab(next);
+      setEditingId(null);
+    };
+    window.addEventListener('popstate', onLocationChange);
+    return () => window.removeEventListener('popstate', onLocationChange);
+  }, []);
+
+  const selectTab = (next: string) => {
+    setTab(next);
+    setEditingId(null);
+    const url = `/cms/programs?tab=${next}`;
+    if (window.location.pathname === '/cms/programs') {
+      window.history.pushState(null, '', url);
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    } else {
+      window.location.assign(url);
+    }
+  };
+
+  const load = async () => {
+    setLoading(true);
+    if (tab === 'inbox') {
+      const [a, b, c] = await Promise.all([
+        supabase.from('membership_applications').select('*').order('created_at', { ascending: false }),
+        supabase.from('council_interest_submissions').select('*').order('created_at', { ascending: false }),
+        supabase.from('event_registrations').select('*').order('created_at', { ascending: false }),
+      ]);
+      setRows([
+        ...(a.data || []).map(x => ({ ...x, source_table: 'membership_applications', source_label: 'Membership' })),
+        ...(b.data || []).map(x => ({ ...x, source_table: 'council_interest_submissions', source_label: 'Council' })),
+        ...(c.data || []).map(x => ({ ...x, source_table: 'event_registrations', source_label: 'Event' })),
+      ]);
+      if (a.error || b.error || c.error) setMessage((a.error || b.error || c.error)?.message || 'Could not load inbox');
+    } else {
+      const orderColumn = tab === 'club' ? 'updated_at' : 'created_at';
+      const { data, error } = await supabase.from(table).select('*').order(orderColumn, { ascending: false });
+      setRows(data || []);
+      if (error) setMessage(error.message);
+    }
+    setLoading(false);
+  };
+
+  useEffect(() => { void load(); }, [table, tab]);
+
+  const set = (key: string, value: string | boolean) => setForm(v => ({ ...v, [key]: value }));
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    setMessage('Saving…');
+    const payload = tab === 'club' ? { ...form, id: true } : { ...form, display_order: Number(form.display_order || 1), active: Boolean(form.active), registration_open: Boolean(form.registration_open) };
+    const result = tab === 'club' ? await supabase.from(table).upsert(payload as any) : editingId ? await supabase.from(table).update(payload as any).eq('id', editingId) : await supabase.from(table).insert(payload as any);
+    setMessage(result.error ? result.error.message : editingId ? 'Updated.' : 'Saved.');
+    if (!result.error) { setEditingId(null); setForm({ status: 'draft', active: true, registration_open: true, visibility: 'public', display_order: '1' }); void load(); }
+  };
+
+  const update = async (row: any, status: string) => {
+    const target = row.source_table || table;
+    const { error } = await supabase.from(target).update({ status }).eq('id', row.id);
+    setMessage(error ? error.message : 'Status updated.');
+    void load();
+  };
+
+  return <div className="admin"><CmsSidebar /><main className="admin-main"><SiteHeader admin /><p className="eyebrow">CMS / AIIF programs</p><h1>Programs</h1><p className="lead">Manage the CEO Club, membership, council and events. Use the menu or tabs below; each tab is a separate content area.</p><div className="program-tabs">{tabs.map(([id, name]) => <button type="button" className={tab === id ? 'is-active' : ''} key={id} onClick={() => selectTab(id)}>{name}</button>)}</div><section className="cms-section"><h2>{labels[tab]}</h2>{tab !== 'inbox' && <form className="content-form program-admin-form" onSubmit={save}><h3>{editingId ? 'Edit record' : tab === 'club' ? 'Club settings' : `Add ${labels[tab].toLowerCase()}`}</h3>{fields.map(([key, label]) => <label key={key}>{label}{key.includes('description') || key.includes('bio') || key.includes('summary') || key.includes('intro') ? <textarea value={String(form[key] || '')} onChange={e => set(key, e.target.value)} /> : <input required={['name_en', 'name_ar', 'title_en', 'title_ar', 'full_name_en', 'full_name_ar', 'slug', 'start_at'].includes(key)} type={key === 'start_at' ? 'datetime-local' : 'text'} value={String(form[key] || '')} onChange={e => set(key, e.target.value)} />}</label>)}{tab === 'membership' && <label>Display order<input type="number" value={String(form.display_order || '1')} onChange={e => set('display_order', e.target.value)} /></label>}{tab === 'council' && <><label>Display order<input type="number" value={String(form.display_order || '1')} onChange={e => set('display_order', e.target.value)} /></label><label>Status<select value={String(form.status)} onChange={e => set('status', e.target.value)}><option value="draft">Draft</option><option value="published">Published</option></select></label></>}{tab === 'events' && <><label>Visibility<select value={String(form.visibility)} onChange={e => set('visibility', e.target.value)}><option value="public">Public</option><option value="members_only">Members only</option><option value="invited">Invite only</option></select></label><label>Status<select value={String(form.status)} onChange={e => set('status', e.target.value)}><option value="draft">Draft</option><option value="published">Published</option></select></label><label>Registration open<input type="checkbox" checked={Boolean(form.registration_open)} onChange={e => set('registration_open', e.target.checked)} /></label></>}<button className="dark-button" type="submit">Save {tab === 'club' ? 'settings' : editingId ? 'changes' : 'record'}</button></form>}<div className="cms-record-list">{loading ? <p>Loading…</p> : rows.map(row => <article key={`${row.source_table || table}-${row.id}`}><div><strong>{row.name_en || row.full_name_en || row.title_en || row.email}</strong><small>{row.source_label || row.email || row.status || row.visibility}</small></div>{tab !== 'inbox' && tab !== 'club' && <button type="button" className="plain-button" onClick={() => { setEditingId(row.id); setForm({ ...row, display_order: String(row.display_order || 1) }); window.scrollTo({ top: 0, behavior: 'smooth' }); }}>Edit</button>}{row.status && <select value={row.status} onChange={e => void update(row, e.target.value)}><option value="pending">Pending</option><option value="under_review">Under review</option><option value="draft">Draft</option><option value="approved">Approved</option><option value="published">Published</option><option value="confirmed">Confirmed</option><option value="rejected">Rejected</option><option value="archived">Archived</option></select>}</article>)}</div></section></main></div>;
+}
